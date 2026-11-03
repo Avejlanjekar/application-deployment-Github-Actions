@@ -1,0 +1,8 @@
+name: Backend cide Pipeline workflow 
+
+on:
+  workflow_dispatch:
+    inputs:
+      Environment:
+        description: Seclect environment for deployment 
+        required: true

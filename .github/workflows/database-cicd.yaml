@@ -2,7 +2,7 @@
 name: Database CI/CD Workflow
 
 on:
-  Workflow_dispatch:
+  workflow_dispatch:
     inputs:
       Environment:
         description: Select the Environment for Deployment
@@ -18,6 +18,8 @@ on:
       imageTag:
         description: Image tag to promote
         type: string
+        default: ''
+        required: false
 
 permissions:
   contents: read
@@ -42,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      image_tag: {{ github.sha }}   
+      image_tag: ${{ github.sha }}   
     
     steps:
       - name: Checkout Repository
@@ -52,7 +54,7 @@ jobs:
         uses: docker/login-action@v3 
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ vars.DOCKERHUB_PASSWORD}}
+          password: ${{ secrets.DOCKERHUB_PASSWORD}}
 
       - name: Build and push database image 
         uses: docker/build-push-action@v6 
@@ -62,3 +64,314 @@ jobs:
           push: true 
           tags: |
             avejlanjekar45/employee-management-database-dev:${{ github.sha }}
+
+  Deploy-Database-Dev:
+    name: Deploy Database to Dev 
+    if: inputs.Environment == 'dev'
+    needs: Build-Push-Dev
+    runs-on: ubuntu-latest 
+
+    steps:
+      - name: checkout repository 
+        uses: actions/checkout@v4 
+
+      - name: configure AWS Credentials 
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: setup Kubectl 
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure EKS Connection
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: setup Helm 
+        uses: azure/setup-helm@v4 
+
+      - name: Check EKS Connection
+        run: | 
+          kubectl get nodes 
+        
+      - name: Helm lint 
+        run: |
+          helm lint "$HELM_CHART" -f "$HELM_CHART"/values-dev.yaml
+
+      - name: Deploy Database to Dev 
+        env:
+          IMAGE_TAG: ${{ needs.Build-Push-Dev.outputs.image_tag }}
+        run: |
+          helm upgrade --install employee-database-dev "$HELM_CHART" \
+            --namespace employee-dev \
+            --create-namespace \
+            -f "$HELM_CHART/values-dev.yaml" \
+            --set component=database \
+            --set database.image.tag="$IMAGE_TAG" \
+            --wait \
+            --timeout 180s 
+      
+      - name: Verify Database Deployment 
+        run: | 
+          kubectl rollout status deployment/mysql-deployment \
+            --namespace employee-dev  --timeout=180s
+
+  Promote-Dev-To-QA:
+    name: Promote Database Dev to QA Environment
+    if: inputs.Environment == 'qa'
+    runs-on: ubuntu-latest 
+
+    steps:
+      - name: Login to DockerHub 
+        uses: docker/login-action@v3 
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      
+      - name: Validate image Tag 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$IMAGE_TAG" || "$IMAGE_TAG" == "latest" ]]; then
+            echo "ERROR: Provide the actual image tag deployed to dev "
+            exit 1
+          fi  
+
+      - name: Promote Dev Image to QA 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail 
+
+          docker pull "$DB_IMAGE_DEV:$IMAGE_TAG"
+
+          docker tag \
+            "$DB_IMAGE_DEV:$IMAGE_TAG" "$DB_IMAGE_QA:$IMAGE_TAG"
+
+          docker push "$DB_IMAGE_QA:$IMAGE_TAG"
+
+  Deploy-Database-QA:
+    name: Deploy Database to QA 
+    if: inputs.Environment == 'qa'
+    needs: Promote-Dev-To-QA
+    runs-on: ubuntu-latest 
+
+    steps:
+      - name: Checkout repository 
+        uses: actions/checkout@v4 
+
+      - name: configure AWS Credentials 
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure EKS Connection 
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: setup helm 
+        uses: azure/setup-helm@v4 
+
+      - name: Check EKS Connection 
+        run: kubectl get nodes 
+
+      - name: Helm lint 
+        run: |
+          helm lint "$HELM_CHART" -f "$HELM_CHART"/values-qa.yaml 
+
+      - name: Deploy Database to QA 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          helm upgrade --install employee-database-qa "$HELM_CHART" \
+            --namespace employee-qa \
+            --create-namespace \
+            -f "$HELM_CHART/values-qa.yaml" \
+            --set component=database \
+            --set database.image.tag="$IMAGE_TAG" \
+            --wait \
+            --timeout 180s 
+
+      - name: Verify Database Deployment 
+        run: |
+          kubectl rollout status deployment/mysql-deployment \
+            --namespace employee-qa \
+            --timeout=180s
+
+  Promote-QA-To-UAT:
+    if: inputs.Environment == 'uat'
+    name: Promote Database image QA to UAt Environment
+    runs-on: ubuntu-latest 
+    steps:
+      - name: Login to Docker Hub 
+        uses: docker/login-action@v3 
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Validate Image tag 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail 
+
+          if [[ -z "$IMAGE_TAG" || "$IMAGE_TAG" == "latest" ]]; then
+            echo "ERROR: Provide the actual image tag deploed to QA "
+            exit 1 
+          fi 
+
+      - name: Promote QA image to UAT 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail
+          docker pull "$DB_IMAGE_QA:$IMAGE_TAG"
+          docker tag "$DB_IMAGE_QA:$IMAGE_TAG" "$DB_IMAGE_UAT:$IMAGE_TAG"
+          docker push "$DB_IMAGE_UAT:$IMAGE_TAG"
+
+  Deploy-Database-UAT:
+    name: Deploy Database to UAT environment 
+    if: inputs.Environment == 'uat'
+    needs: Promote-QA-To-UAT
+    runs-on: ubuntu-latest 
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl 
+        uses: azure/setup-kubectl@v4 
+
+      - name: Configure EKS Connection 
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: setup-helm 
+        uses: azure/setup-helm@v4 
+
+      - name: Check EKS Connection 
+        run: kubectl get nodes 
+
+      - name: Helm init 
+        run: |
+          helm lint "$HELM_CHART" -f "$HELM_CHART"/values-uat.yaml 
+
+      - name: Deploy Database to UAT 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          helm upgrade --install employee-database-uat "$HELM_CHART" \
+            --namespace employee-uat \
+            --create-namespace \
+            -f "$HELM_CHART/values-uat.yaml" \
+            --set component=database \
+            --set database.image.tag="$IMAGE_TAG" \
+            --wait \
+            --timeout 180s 
+
+      - name: Verify Database Deployment 
+        run: |
+          kubectl rollout status deployment/mysql-deployment \
+            --namespace employee-uat \
+            --timeout=180s
+
+  Promote-UAT-To-Prod:
+    name: Promote database image uat to prod 
+    if: inputs.Environment == 'prod'
+    runs-on: ubuntu-latest 
+
+    environment: employee-management-prod 
+
+    steps:
+      - name: Login to DockerHub 
+        uses: docker/login-action@v3 
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Validate Image tag 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$IMAGE_TAG" || "$IMAGE_TAG" == "latest" ]]; then
+            echo "ERROR: Provide the actual image tag deployed to UAT"
+            exit 1
+          fi
+        
+      - name: Promote database image uat to prod 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail 
+
+          docker pull "$DB_IMAGE_UAT:$IMAGE_TAG"
+
+          docker tag "$DB_IMAGE_UAT:$IMAGE_TAG" "$DB_IMAGE_PROD:$IMAGE_TAG"
+
+          docker push "$DB_IMAGE_PROD:$IMAGE_TAG"
+
+  Deploy-Database-PROD:
+    name: Deploy Database to PROD environment 
+    if: inputs.Environment == 'prod'
+    needs: Promote-UAT-To-Prod
+    runs-on: ubuntu-latest 
+    
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl 
+        uses: azure/setup-kubectl@v4 
+
+      - name: Configure EKS Connection 
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: setup-helm 
+        uses: azure/setup-helm@v4 
+
+      - name: Check EKS Connection 
+        run: kubectl get nodes 
+
+      - name: Helm init 
+        run: |
+          helm lint "$HELM_CHART" -f "$HELM_CHART"/values-prod.yaml 
+
+      - name: Deploy Database to PROD 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          helm upgrade --install employee-database-prod "$HELM_CHART" \
+            --namespace employee-prod \
+            --create-namespace \
+            -f "$HELM_CHART/values-prod.yaml" \
+            --set component=database \
+            --set database.image.tag="$IMAGE_TAG" \
+            --wait \
+            --timeout 180s 
+
+      - name: Verify Database Deployment 
+        run: |
+          kubectl rollout status deployment/mysql-deployment \
+            --namespace employee-prod \
+            --timeout=180s
