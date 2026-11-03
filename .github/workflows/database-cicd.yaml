@@ -1,0 +1,64 @@
+
+name: Database CI/CD Workflow
+
+on:
+  Workflow_dispatch:
+    inputs:
+      Environment:
+        description: Select the Environment for Deployment
+        required: true
+        type: choice
+        default: dev
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      
+      imageTag:
+        description: Image tag to promote
+        type: string
+
+permissions:
+  contents: read
+  id-token: write 
+
+env:
+  AWS_REGION: ap-south-1
+  EKS_CLUSTER: employee-management-eks 
+  BUILD_CONTEXT: ./db 
+  HELM_CHART: ./helm/employee-management 
+  DB_IMAGE_DEV: avejlanjekar45/employee-management-database-dev 
+  DB_IMAGE_QA: avejlanjekar45/employee-management-database-qa 
+  DB_IMAGE_UAT: avejlanjekar45/employee-management-database-uat 
+  DB_IMAGE_PROD: avejlanjekar45/employee-management-database-prod 
+
+
+jobs:
+
+  Build-Push-Dev:
+    name: Build and push Database image to Dev 
+    if: inputs.Environment == 'dev'
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: {{ github.sha }}   
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3 
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ vars.DOCKERHUB_PASSWORD}}
+
+      - name: Build and push database image 
+        uses: docker/build-push-action@v6 
+        with:
+          context: ./db 
+          file: ./db/Dockerfile 
+          push: true 
+          tags: |
+            avejlanjekar45/employee-management-database-dev:${{ github.sha }}
