@@ -107,6 +107,11 @@ jobs:
         run: |
           helm lint "$HELM_CHART" -f "$HELM_CHART"/values-dev.yaml
 
+      - name: Test Namespace Creation Permission
+        run: |
+          kubectl auth can-i create namespaces
+          kubectl auth can-i patch namespaces
+
       - name: Deploy Database to Dev 
         env:
           IMAGE_TAG: ${{ needs.Build-Push-Dev.outputs.image_tag }}
