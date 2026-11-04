@@ -4,5 +4,373 @@ on:
   workflow_dispatch:
     inputs:
       Environment:
-        description: Seclect environment for deployment 
+        description: Select environment for deployment 
         required: true
+        type: choice 
+        default: dev 
+        options:
+          - dev
+          - qa 
+          - uat 
+          - prod 
+
+      imageTag:
+        description: select the image tag for promotion 
+        type: string
+        default: ''
+        required: false 
+
+permissions:
+  contents: read 
+  id-token: write 
+
+env:
+  AWS_REGION: ap-south-1
+  EKS_CLUSTER: employee-management-eks 
+  BUILD_CONTEXT: ./backend 
+  HELM_CHART: ./helm/employee-management 
+  BACKEND_IMAGE_DEV: avejlanjekar45/employee-management-backend-dev 
+  BACKEND_IMAGE_QA: avejlanjekar45/employee-management-backend-qa 
+  BACKEND_IMAGE_UAT: avejlanjekar45/employee-management-backend-uat 
+  BACKEND_IMAGE_PROD: avejlanjekar45/employee-management-backend-prod 
+
+
+jobs:
+
+  Build-Push-Dev:
+    name: Build and push Backend image to Dev 
+    if: inputs.Environment == 'dev'
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ github.sha }}   
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3 
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD}}
+
+      - name: Build and push Backend image 
+        uses: docker/build-push-action@v6 
+        with:
+          context: ./backend 
+          file: ./backend/Dockerfile 
+          push: true 
+          tags: |
+            avejlanjekar45/employee-management-backend-dev:${{ github.sha }}
+
+  Deploy-Backend-Dev:
+    name: Deploy backend to Dev 
+    if: inputs.Environment == 'dev'
+    needs: Build-Push-Dev
+    runs-on: ubuntu-latest 
+
+    steps:
+      - name: checkout repository 
+        uses: actions/checkout@v4 
+
+      - name: configure AWS Credentials 
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: setup Kubectl 
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure EKS Connection
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: setup Helm 
+        uses: azure/setup-helm@v4 
+
+      - name: Check EKS Connection
+        run: | 
+          kubectl get nodes 
+        
+      - name: Helm lint 
+        run: |
+          helm lint "$HELM_CHART" -f "$HELM_CHART"/values-dev.yaml
+
+      - name: Deploy backend to Dev 
+        env:
+          IMAGE_TAG: ${{ needs.Build-Push-Dev.outputs.image_tag }}
+        run: |
+          helm upgrade --install employee-backend-dev "$HELM_CHART" \
+            --namespace employee-dev \
+            --create-namespace \
+            -f "$HELM_CHART/values-dev.yaml" \
+            --set component=backend \
+            --set backend.image.tag="$IMAGE_TAG" \
+            --wait \
+            --timeout 180s 
+      
+      - name: Verify backend Deployment 
+        run: | 
+          kubectl rollout status deployment/backend-deployment \
+            --namespace employee-dev  --timeout=180s
+
+  Promote-Dev-To-QA:
+    name: Promote backend Dev to QA Environment
+    if: inputs.Environment == 'qa'
+    runs-on: ubuntu-latest 
+
+    steps:
+      - name: Login to DockerHub 
+        uses: docker/login-action@v3 
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      
+      - name: Validate image Tag 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$IMAGE_TAG" || "$IMAGE_TAG" == "latest" ]]; then
+            echo "ERROR: Provide the actual image tag deployed to dev "
+            exit 1
+          fi  
+
+      - name: Promote Dev Image to QA 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail 
+
+          docker pull "$BACKEND_IMAGE_DEV:$IMAGE_TAG"
+
+          docker tag \
+            "$BACKEND_IMAGE_DEV:$IMAGE_TAG" "$BACKEND_IMAGE_QA:$IMAGE_TAG"
+
+          docker push "$BACKEND_IMAGE_QA:$IMAGE_TAG"
+
+  Deploy-Backend-QA:
+    name: Deploy backend to QA 
+    if: inputs.Environment == 'qa'
+    needs: Promote-Dev-To-QA
+    runs-on: ubuntu-latest 
+
+    steps:
+      - name: Checkout repository 
+        uses: actions/checkout@v4 
+
+      - name: configure AWS Credentials 
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure EKS Connection 
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: setup helm 
+        uses: azure/setup-helm@v4 
+
+      - name: Check EKS Connection 
+        run: kubectl get nodes 
+
+      - name: Helm lint 
+        run: |
+          helm lint "$HELM_CHART" -f "$HELM_CHART"/values-qa.yaml 
+
+      - name: Deploy backend to QA 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          helm upgrade --install employee-backend-qa "$HELM_CHART" \
+            --namespace employee-qa \
+            --create-namespace \
+            -f "$HELM_CHART/values-qa.yaml" \
+            --set component=backend \
+            --set backend.image.tag="$IMAGE_TAG" \
+            --wait \
+            --timeout 180s 
+
+      - name: Verify backend Deployment 
+        run: |
+          kubectl rollout status deployment/backend-deployment \
+            --namespace employee-qa \
+            --timeout=180s
+
+  Promote-QA-To-UAT:
+    if: inputs.Environment == 'uat'
+    name: Promote backend image QA to UAt Environment
+    runs-on: ubuntu-latest 
+    steps:
+      - name: Login to Docker Hub 
+        uses: docker/login-action@v3 
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Validate Image tag 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail 
+
+          if [[ -z "$IMAGE_TAG" || "$IMAGE_TAG" == "latest" ]]; then
+            echo "ERROR: Provide the actual image tag deploed to QA "
+            exit 1 
+          fi 
+
+      - name: Promote QA image to UAT 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail
+          docker pull "$BACKEND_IMAGE_QA:$IMAGE_TAG"
+          docker tag "$BACKEND_IMAGE_QA:$IMAGE_TAG" "$BACKEND_IMAGE_UAT:$IMAGE_TAG"
+          docker push "$BACKEND_IMAGE_UAT:$IMAGE_TAG"
+
+  Deploy-Backend-UAT:
+    name: Deploy BACKEND to UAT environment 
+    if: inputs.Environment == 'uat'
+    needs: Promote-QA-To-UAT
+    runs-on: ubuntu-latest 
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl 
+        uses: azure/setup-kubectl@v4 
+
+      - name: Configure EKS Connection 
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: setup-helm 
+        uses: azure/setup-helm@v4 
+
+      - name: Check EKS Connection 
+        run: kubectl get nodes 
+
+      - name: Helm init 
+        run: |
+          helm lint "$HELM_CHART" -f "$HELM_CHART"/values-uat.yaml 
+
+      - name: Deploy BACKEND to UAT 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          helm upgrade --install employee-backend-uat "$HELM_CHART" \
+            --namespace employee-uat \
+            --create-namespace \
+            -f "$HELM_CHART/values-uat.yaml" \
+            --set component=backend \
+            --set backend.image.tag="$IMAGE_TAG" \
+            --wait \
+            --timeout 180s 
+
+      - name: Verify backend Deployment 
+        run: |
+          kubectl rollout status deployment/backend-deployment \
+            --namespace employee-uat \
+            --timeout=180s
+
+  Promote-UAT-To-Prod:
+    name: Promote Backend image uat to prod 
+    if: inputs.Environment == 'prod'
+    runs-on: ubuntu-latest 
+
+    environment: employee-management-prod 
+
+    steps:
+      - name: Login to DockerHub 
+        uses: docker/login-action@v3 
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Validate Image tag 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$IMAGE_TAG" || "$IMAGE_TAG" == "latest" ]]; then
+            echo "ERROR: Provide the actual image tag deployed to UAT"
+            exit 1
+          fi
+        
+      - name: Promote backend image uat to prod 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          set -euo pipefail 
+
+          docker pull "$BACKEND_IMAGE_UAT:$IMAGE_TAG"
+
+          docker tag "$BACKEND_IMAGE_UAT:$IMAGE_TAG" "$BACKEND_IMAGE_PROD:$IMAGE_TAG"
+
+          docker push "$BACKEND_IMAGE_PROD:$IMAGE_TAG"
+
+  Deploy-Backend-PROD:
+    name: Deploy Backend to PROD environment 
+    if: inputs.Environment == 'prod'
+    needs: Promote-UAT-To-Prod
+    runs-on: ubuntu-latest 
+    
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl 
+        uses: azure/setup-kubectl@v4 
+
+      - name: Configure EKS Connection 
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: setup-helm 
+        uses: azure/setup-helm@v4 
+
+      - name: Check EKS Connection 
+        run: kubectl get nodes 
+
+      - name: Helm init 
+        run: |
+          helm lint "$HELM_CHART" -f "$HELM_CHART"/values-prod.yaml 
+
+      - name: Deploy Backend to PROD 
+        env:
+          IMAGE_TAG: ${{ inputs.imageTag }}
+        run: |
+          helm upgrade --install employee-backend-prod "$HELM_CHART" \
+            --namespace employee-prod \
+            --create-namespace \
+            -f "$HELM_CHART/values-prod.yaml" \
+            --set component=backend \
+            --set backend.image.tag="$IMAGE_TAG" \
+            --wait \
+            --timeout 180s 
+
+      - name: Verify Backend Deployment 
+        run: |
+          kubectl rollout status deployment/backend-deployment \
+            --namespace employee-prod \
+            --timeout=180s
