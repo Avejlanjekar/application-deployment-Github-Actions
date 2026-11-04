@@ -89,10 +89,6 @@ jobs:
 
       - name: setup Helm 
         uses: azure/setup-helm@v4 
-
-      - name: Check EKS Connection
-        run: | 
-          kubectl get nodes 
         
       - name: Helm lint 
         run: |
@@ -178,9 +174,6 @@ jobs:
       - name: setup helm 
         uses: azure/setup-helm@v4 
 
-      - name: Check EKS Connection 
-        run: kubectl get nodes 
-
       - name: Helm lint 
         run: |
           helm lint "$HELM_CHART" -f "$HELM_CHART"/values-qa.yaml 
@@ -259,9 +252,6 @@ jobs:
 
       - name: setup-helm 
         uses: azure/setup-helm@v4 
-
-      - name: Check EKS Connection 
-        run: kubectl get nodes 
 
       - name: Helm init 
         run: |
@@ -348,9 +338,6 @@ jobs:
 
       - name: setup-helm 
         uses: azure/setup-helm@v4 
-
-      - name: Check EKS Connection 
-        run: kubectl get nodes 
 
       - name: Helm init 
         run: |
