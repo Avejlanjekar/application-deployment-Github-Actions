@@ -84,6 +84,9 @@ jobs:
       - name: setup Kubectl 
         uses: azure/setup-kubectl@v4
 
+      - name: Verify AWS Identity
+        run: aws sts get-caller-identity
+
       - name: Configure EKS Connection
         run: |
           aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
