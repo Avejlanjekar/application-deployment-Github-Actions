@@ -1,38 +1,21 @@
-name: AWS OIDC Claims Debug
+name: AWS OIDC Authentication test 
 
 on:
   workflow_dispatch:
 
 permissions:
+  id-token: write 
   contents: read
-  id-token: write
 
 jobs:
-  inspect-oidc:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Inspect GitHub OIDC Claims
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const token = await core.getIDToken('sts.amazonaws.com');
-            const payload = token.split('.')[1];
-            const claims = JSON.parse(
-              Buffer.from(payload, 'base64url').toString()
-            );
+  aws-auth-test:
+    runs-on: ubuntu-latest 
 
-            for (const key of [
-              'iss',
-              'aud',
-              'sub',
-              'repository',
-              'repository_id',
-              'repository_owner',
-              'repository_owner_id',
-              'ref',
-              'environment'
-            ]) {
-              if (claims[key] !== undefined) {
-                core.info(`${key}: ${claims[key]}`);
-              }
-            }
+    steps:
+      - name: Configure AWS credentials 
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-south-1
+      - name: verify aws identity
+        run: aws sts get-caller-identity 
