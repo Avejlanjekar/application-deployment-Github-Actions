@@ -91,14 +91,14 @@ jobs:
         run: |
           aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
 
-      - name: Verify Kubernetes Access
+      - name: Check EKS Connection
         run: |
+          echo "Checking Dev namespace access..."
           kubectl auth can-i get pods -n employee-dev
           kubectl get pods -n employee-dev
 
-      - name: Check EKS Connection
-        run: | 
-          kubectl get nodes 
+          echo "Checking namespace access..."
+          kubectl auth can-i get deployments -n employee-dev
 
       - name: setup Helm 
         uses: azure/setup-helm@v4 
